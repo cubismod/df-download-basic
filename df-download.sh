@@ -1,30 +1,30 @@
 #!/usr/bin/env bash
 #
-# Simple downloader that strips URL query strings from the output filename
-# and queues background downloads with wget.
+# Downloader that strips URL query strings from the output filename,
+# queues background downloads with wget, optionally shows foreground progress,
+# and prompts (using gum if available) to redownload if the file already exists.
 #
 # Usage:
-#   DF_DOWNLOAD_DIR=/path/to/dir ./df-download.sh "https://example.com/path/My%20Video.mp4?token=XXXXX"
-#   ./df-download.sh url1 url2 ...
+#   DF_DOWNLOAD_DIR=/path/to/dir ./df-download.sh [OPTIONS] [URL]...
+#
+# Options:
+#   -f, --foreground   Show wget progress in the foreground (no backgrounding)
+#   -h, --help         Show help
 #
 # Notes:
-# - The script strips everything after the first '?' when deriving the local filename.
-# - The original URL (including any query string) is passed to wget so the download works.
-# - Do NOT commit or log sensitive query tokens anywhere. This script avoids putting
-#   the full URL (with its query) into logs, messages, or output filenames.
-#
-# Environment:
-# - DF_DOWNLOAD_DIR: directory to save downloads. Defaults to "$HOME/Downloads" then current directory.
+# - The script strips the query string (the part after '?') when deriving the local filename.
+# - The full URL (including query) is passed to wget so downloads that require tokens work.
+# - The script does NOT print the full URL (including query) to stdout to avoid leaking tokens.
 #
 set -euo pipefail
 
-# Check for gum for nicer UI. If not present, fall back to plain output.
+# Detect gum availability
 GUM_AVAILABLE=0
 if command -v gum >/dev/null 2>&1; then
   GUM_AVAILABLE=1
 fi
 
-# Convenience helpers that use gum if available
+# Helpers to print styled messages if gum is present, otherwise fallback to echo.
 gum_info() {
   if [[ "$GUM_AVAILABLE" -eq 1 ]]; then
     gum style --foreground 212 "$1"
@@ -41,79 +41,94 @@ gum_error() {
   fi
 }
 
-# Default download directory
+gum_confirm() {
+  # Usage: gum_confirm "Question?"
+  # Returns 0 on yes, 1 on no.
+  local prompt="$1"
+  if [[ "$GUM_AVAILABLE" -eq 1 ]]; then
+    if gum confirm --no-spin --placeholder "$prompt"; then
+      return 0
+    else
+      return 1
+    fi
+  else
+    # Fallback prompt
+    while true; do
+      read -r -p "$prompt [y/N]: " yn
+      case "${yn:-n}" in
+        [Yy]*) return 0 ;;
+        [Nn]*|'') return 1 ;;
+      esac
+    done
+  fi
+}
+
+# Default download directory (can be overridden by DF_DOWNLOAD_DIR env var)
 DF_DOWNLOAD_DIR="${DF_DOWNLOAD_DIR:-${HOME:-.}/Downloads}"
 
-# Create download dir if necessary
+# Ensure download dir exists
 mkdir -p -- "$DF_DOWNLOAD_DIR"
 
-# Print usage
+# Print usage/help
 usage() {
   if [[ "$GUM_AVAILABLE" -eq 1 ]]; then
-    gum style --foreground 63 --bold "Usage: $(basename "$0") [URL]..."
-    gum style "Download one or more URLs to the directory specified by DF_DOWNLOAD_DIR.
-If DF_DOWNLOAD_DIR is not set, defaults to \$HOME/Downloads.
+    gum style --foreground 63 --bold "Usage: $(basename "$0") [OPTIONS] [URL]..."
+    gum style "Download one or more URLs to DF_DOWNLOAD_DIR (defaults to \$HOME/Downloads).
+The script strips the query string when creating the local filename and never prints
+the full URL (including query) to stdout.
 
-The script strips the query string (the part after '?') when creating the output filename
-and replaces unsafe characters with underscores. The full URL (including query) is used
-for the actual download so the request succeeds.
+Options:
+  -f, --foreground   Show wget progress in foreground (do not background)
+  -h, --help         Show this help and exit
 
 Examples:
-  DF_DOWNLOAD_DIR=\$PWD/downloads $(basename \"$0\") \"https://example.com/path/Video%20Name.mp4?secure=...\"
-  $(basename \"$0\") -     # read URLs from stdin, one per line
-
-IMPORTANT: do NOT paste sensitive query tokens into logs or commit them to source control."
+  DF_DOWNLOAD_DIR=\$PWD/downloads $(basename "$0") -f \"https://example.com/video.mp4?secure=...\"
+  $(basename "$0") -  # read URLs from stdin"
   else
     cat <<EOF
-Usage: $(basename "$0") [URL]...
-Download one or more URLs to the directory specified by DF_DOWNLOAD_DIR.
-If DF_DOWNLOAD_DIR is not set, defaults to \$HOME/Downloads.
+Usage: $(basename "$0") [OPTIONS] [URL]...
+Download one or more URLs to DF_DOWNLOAD_DIR (defaults to \$HOME/Downloads).
+The script strips the query string when creating the local filename and never prints
+the full URL (including query) to stdout.
 
-The script strips the query string (the part after '?') when creating the output filename
-and replaces unsafe characters with underscores. The full URL (including query) is used
-for the actual download so the request succeeds.
+Options:
+  -f, --foreground   Show wget progress in foreground (do not background)
+  -h, --help         Show this help and exit
 
 Examples:
-  DF_DOWNLOAD_DIR=\$PWD/downloads $(basename "$0") "https://example.com/path/Video%20Name.mp4?secure=..."
-  $(basename "$0") -     # read URLs from stdin, one per line
-
-IMPORTANT: do NOT paste sensitive query tokens into logs or commit them to source control.
+  DF_DOWNLOAD_DIR=\$PWD/downloads $(basename "$0") -f "https://example.com/video.mp4?secure=..."
+  $(basename "$0") -  # read URLs from stdin
 EOF
   fi
 }
 
-# URL-decode a percent-encoded string
+# URL-decode percent-encoding (simple)
 urldecode() {
   local s="$1"
-  # Replace + with space
   s="${s//+/ }"
-  # Convert %XX to characters. printf with \x escapes.
   # shellcheck disable=SC2059
   printf '%b' "${s//%/\\x}"
 }
 
-# Sanitize a filename to remove or replace unsafe characters
+# Sanitize filename: remove path chars, replace spaces, remove unsafe chars
 sanitize_filename() {
   local name="$1"
-  # Trim leading/trailing whitespace
+  # trim
   name="${name#"${name%%[![:space:]]*}"}"
   name="${name%"${name##*[![:space:]]}"}"
-  # Replace path separators with underscores
   name="${name//\//_}"
-  # Replace spaces with underscores
   name="${name// /_}"
-  # Replace any character that is not alnum, dot, dash, or underscore with underscore
+  # replace non-alnum and not in . _ - with underscore
   name="$(echo "$name" | sed -E 's/[^A-Za-z0-9._-]/_/g')"
-  # Collapse multiple underscores
+  # collapse underscores
   name="$(echo "$name" | sed -E 's/_+/_/g')"
-  # Prevent empty filename
   if [[ -z "$name" ]]; then
     name="download"
   fi
   printf '%s' "$name"
 }
 
-# Ensure filename doesn't overwrite an existing file: add suffix if necessary
+# Ensure unique filename (append _N suffix if needed)
 unique_path() {
   local dir="$1"
   local name="$2"
@@ -133,88 +148,173 @@ unique_path() {
   printf '%s' "$candidate"
 }
 
-# Process a single URL
+# Check if a destination file already exists and if user wants to redownload.
+# Returns:
+#   0 = proceed with download (either file doesn't exist, or user chose to redownload)
+#   1 = skip download (user chose not to redownload)
+check_existing_and_prompt() {
+  local dest="$1"
+
+  if [[ -e "$dest" ]]; then
+    # File exists: ask user if they want to re-download (redownload) it.
+    # We avoid printing any URL or other sensitive info; only filename/path is shown.
+    if gum_confirm "File already exists: $dest. Redownload (overwrite) it?"; then
+      # User wants to redownload: remove the existing file first to ensure a fresh download.
+      # We remove the file before downloading so wget doesn't attempt to resume.
+      rm -f -- "$dest"
+      gum_info "Existing file removed; will redownload -> $dest"
+      return 0
+    else
+      gum_info "Skipping (file exists) -> $dest"
+      return 1
+    fi
+  fi
+
+  # File doesn't exist; proceed
+  return 0
+}
+
+# Global option: foreground or background
+FOREGROUND=0
+
+# Parse leading CLI options (-f/--foreground, -h/--help)
+while [[ ${1-} == -* ]]; do
+  case "$1" in
+    -f|--foreground)
+      FOREGROUND=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      break
+      ;;
+    *)
+      gum_error "Unknown option: $1"
+      usage
+      exit 1
+      ;;
+  esac
+done
+
+# Collect URLs from positional args or stdin
+urls=()
+if [[ $# -gt 0 ]]; then
+  # remaining args are URLs
+  for a in "$@"; do
+    urls+=("$a")
+  done
+else
+  # If nothing provided as args, try reading stdin (pipe)
+  if ! [[ -t 0 ]]; then
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      line="${line#"${line%%[![:space:]]*}"}"
+      line="${line%"${line##*[![:space:]]}"}"
+      [[ -z "$line" ]] && continue
+      urls+=("$line")
+    done
+  else
+    # Interactive and no URLs: prompt once if gum available
+    if [[ "$GUM_AVAILABLE" -eq 1 ]]; then
+      gum_info "Enter a URL to download (or leave empty to cancel):"
+      first="$(gum input --placeholder 'https://example.com/video.mp4?secure=...')"
+      if [[ -n "$first" ]]; then
+        urls+=("$first")
+      else
+        gum_error "No URL entered. Exiting."
+        exit 1
+      fi
+    else
+      usage
+      exit 1
+    fi
+  fi
+fi
+
+if [[ ${#urls[@]} -eq 0 ]]; then
+  gum_error "No URLs to download. Exiting."
+  exit 1
+fi
+
+# Ensure download dir exists (again)
+mkdir -p -- "$DF_DOWNLOAD_DIR"
+
+# Main per-URL processing
 download_one() {
   local url="$1"
 
-  # Minimal URL validation
+  # Basic validation
   if [[ ! "$url" =~ ^https?:// ]]; then
     gum_error "Skipping invalid URL: <redacted>"
     return 1
   fi
 
-  # Derive the filename by stripping the query string and taking the last path segment.
-  # We intentionally do not log or echo the full URL with its query string.
+  # Strip query portion to derive filename
   local url_no_query="${url%%\?*}"
   local raw_name="${url_no_query##*/}"
-
-  # If the URL path ends with a slash, use a default name
   if [[ -z "$raw_name" ]]; then
     raw_name="download"
   fi
 
-  # URL-decode the raw name, then sanitize
+  # Decode and sanitize
   local decoded
   decoded="$(urldecode "$raw_name" 2>/dev/null || echo "$raw_name")"
   local sanitized
   sanitized="$(sanitize_filename "$decoded")"
 
-  # Ensure an extension (if none, assume .mp4 as requested)
+  # Ensure extension; default to .mp4 if none
   if [[ "$sanitized" != *.* ]]; then
     sanitized="${sanitized}.mp4"
   fi
 
-  # Build unique destination path
+  # Build destination path (unique)
   local dest
   dest="$(unique_path "$DF_DOWNLOAD_DIR" "$sanitized")"
 
-  # Start background wget. Use -c to continue, -b to background, and -O to write to our sanitized filename.
-  # We put the URL at the end; we avoid echoing the URL (with query) to stdout or logs.
-  gum_info "Starting download into: $dest"
-  # Start wget in background. We intentionally do not print the URL to avoid leaking sensitive query tokens.
-  # The command below will create a wget log file in the current working directory (wget-log or wget-log.N).
-  # Quoting the URL so any special characters are handled by wget.
-  wget -c -b -O "$dest" -- "$url" >/dev/null 2>&1 || {
-    gum_error "Failed to start wget for destination: $dest"
-    return 1
-  }
+  gum_info "Destination: $dest"
 
-  # Provide the wget log filename for user's reference (wget writes to wget-log by default).
-  # We do not include the URL in our messages.
-  gum_info "Queued (background) -> $dest"
-  return 0
+  # If file exists (unique_path ensures non-collision) — but in rare case unique_path may append suffix,
+  # we still check for the specific dest since unique_path checks for existing files.
+  # Ask user whether to redownload if it exists.
+  if ! check_existing_and_prompt "$dest"; then
+    # User chose not to redownload
+    return 0
+  fi
+
+  # Start wget either in foreground or background
+  if [[ "$FOREGROUND" -eq 1 ]]; then
+    gum_info "Downloading (foreground) -> $dest"
+    if command -v wget >/dev/null 2>&1; then
+      # Show progress; wget will output progress to terminal.
+      wget -c --show-progress -O "$dest" -- "$url"
+      local rc=$?
+      if [[ $rc -ne 0 ]]; then
+        gum_error "wget failed for: $dest (exit $rc)"
+        return 1
+      fi
+      gum_info "Completed -> $dest"
+      return 0
+    else
+      gum_error "wget not found on PATH"
+      return 1
+    fi
+  else
+    gum_info "Queuing (background) -> $dest"
+    wget -c -b -O "$dest" -- "$url" >/dev/null 2>&1 || {
+      gum_error "Failed to start wget for destination: $dest"
+      return 1
+    }
+    gum_info "Queued -> $dest"
+    return 0
+  fi
 }
 
-# If no args, read from stdin (one URL per line)
-if [[ "${#@}" -eq 0 ]]; then
-  # If user passed '-' as single arg it means read stdin; handle that case earlier.
-  if [[ -t 0 ]]; then
-    usage
-    exit 1
-  fi
-fi
-
-# Accept '-' for reading stdin URLs
-urls=()
-if [[ "${#@}" -eq 1 ]] && [[ "$1" == "-" ]]; then
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    # trim
-    line="${line#"${line%%[![:space:]]*}"}"
-    line="${line%"${line##*[![:space:]]}"}"
-    [[ -z "$line" ]] && continue
-    urls+=("$line")
-  done
-else
-  for a in "$@"; do
-    urls+=("$a")
-  done
-fi
-
-# Iterate and download
+# Iterate over URLs
 for u in "${urls[@]}"; do
-  # Avoid echoing the full URL with query to stdout. We only show the sanitized no-query form.
-  # But still pass the full URL to wget so downloads that require query tokens succeed.
-  download_one "$u" || gum_error "Warning: failed to queue URL (redacted) for download."
+  download_one "$u" || gum_error "Warning: failed to queue or download (redacted)."
 done
 
-gum_info "All URLs processed. Check wget logs (wget-log*) for background download progress."
+gum_info "All requests processed. For background downloads check wget-log*; foreground downloads printed above."
