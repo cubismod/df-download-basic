@@ -30,3 +30,16 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Project specific
+bin/
+downloads/
+*.log
+
+# Docker
+docker-compose.override.yml
+.docker/
+
+# OS specific
+.DS_Store
+Thumbs.db
