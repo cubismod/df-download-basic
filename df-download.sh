@@ -11,11 +11,6 @@
 #   -f, --foreground   Show wget progress in the foreground (no backgrounding)
 #   -h, --help         Show help
 #
-# Notes:
-# - The script strips the query string (the part after '?') when deriving the local filename.
-# - The full URL (including query) is passed to wget so downloads that require tokens work.
-# - The script does NOT print the full URL (including query) to stdout to avoid leaking tokens.
-#
 set -euo pipefail
 
 # Detect gum availability
