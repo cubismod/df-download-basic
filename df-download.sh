@@ -9,7 +9,12 @@
 #
 # Options:
 #   -f, --foreground   Show wget progress in the foreground (no backgrounding)
+#   --processor        Process the queue file (download queued videos)
 #   -h, --help         Show help
+#
+# Environment Variables:
+#   DF_QUEUE=true      Enable queue mode (add URLs to queue file instead of downloading)
+#   DF_QUEUE_FILE      Path to queue file (defaults to $HOME/.df_queue)
 #
 set -euo pipefail
 
@@ -61,6 +66,10 @@ gum_confirm() {
 # Default download directory (can be overridden by DF_DOWNLOAD_DIR env var)
 DF_DOWNLOAD_DIR="${DF_DOWNLOAD_DIR:-${HOME:-.}/Downloads}"
 
+# Queue configuration
+DF_QUEUE="${DF_QUEUE:-false}"
+DF_QUEUE_FILE="${DF_QUEUE_FILE:-${HOME:-.}/.df_queue}"
+
 # Ensure download dir exists
 mkdir -p -- "$DF_DOWNLOAD_DIR"
 
@@ -74,11 +83,18 @@ the full URL (including query) to stdout.
 
 Options:
   -f, --foreground   Show wget progress in foreground (do not background)
+  --processor        Process the queue file (download queued videos)
   -h, --help         Show this help and exit
+
+Environment Variables:
+  DF_QUEUE=true      Enable queue mode (add URLs to queue file instead of downloading)
+  DF_QUEUE_FILE      Path to queue file (defaults to \$HOME/.df_queue)
 
 Examples:
   DF_DOWNLOAD_DIR=\$PWD/downloads $(basename "$0") -f \"https://example.com/video.mp4?secure=...\"
-  $(basename "$0") -  # read URLs from stdin"
+  $(basename "$0") -  # read URLs from stdin
+  DF_QUEUE=true $(basename "$0") \"https://example.com/video.mp4?secure=...\"  # add to queue
+  $(basename "$0") --processor  # process queue"
   else
     cat <<EOF
 Usage: $(basename "$0") [OPTIONS] [URL]...
@@ -88,11 +104,18 @@ the full URL (including query) to stdout.
 
 Options:
   -f, --foreground   Show wget progress in foreground (do not background)
+  --processor        Process the queue file (download queued videos)
   -h, --help         Show this help and exit
+
+Environment Variables:
+  DF_QUEUE=true      Enable queue mode (add URLs to queue file instead of downloading)
+  DF_QUEUE_FILE      Path to queue file (defaults to \$HOME/.df_queue)
 
 Examples:
   DF_DOWNLOAD_DIR=\$PWD/downloads $(basename "$0") -f "https://example.com/video.mp4?secure=..."
   $(basename "$0") -  # read URLs from stdin
+  DF_QUEUE=true $(basename "$0") "https://example.com/video.mp4?secure=..."  # add to queue
+  $(basename "$0") --processor  # process queue
 EOF
   fi
 }
@@ -171,12 +194,17 @@ check_existing_and_prompt() {
 
 # Global option: foreground or background
 FOREGROUND=0
+PROCESSOR_MODE=0
 
-# Parse leading CLI options (-f/--foreground, -h/--help)
+# Parse leading CLI options (-f/--foreground, --processor, -h/--help)
 while [[ ${1-} == -* ]]; do
   case "$1" in
     -f|--foreground)
       FOREGROUND=1
+      shift
+      ;;
+    --processor)
+      PROCESSOR_MODE=1
       shift
       ;;
     -h|--help)
@@ -194,6 +222,57 @@ while [[ ${1-} == -* ]]; do
       ;;
   esac
 done
+
+# Process queue mode
+if [[ "$PROCESSOR_MODE" -eq 1 ]]; then
+  if [[ ! -f "$DF_QUEUE_FILE" ]]; then
+    gum_error "Queue file not found: $DF_QUEUE_FILE"
+    exit 1
+  fi
+
+  if [[ ! -s "$DF_QUEUE_FILE" ]]; then
+    gum_info "Queue is empty."
+    exit 0
+  fi
+
+  gum_info "Processing queue from: $DF_QUEUE_FILE"
+  
+  # Create a temporary file for the updated queue
+  temp_queue="$(mktemp)"
+  trap 'rm -f "$temp_queue"' EXIT
+  
+  # Process each URL in the queue
+  while IFS= read -r url || [[ -n "$url" ]]; do
+    url="${url#"${url%%[![:space:]]*}"}"
+    url="${url%"${url##*[![:space:]]}"}"
+    [[ -z "$url" ]] && continue
+    
+    gum_info "Processing from queue: <URL redacted>"
+    
+    # Download this URL (always in foreground for processor mode)
+    FOREGROUND=1
+    DF_QUEUE=false  # Disable queue mode to actually download
+    if download_one "$url"; then
+      gum_info "Successfully downloaded from queue."
+      # Don't add to temp file (remove from queue)
+    else
+      gum_error "Failed to download. Keeping in queue."
+      # Keep in queue by writing to temp file
+      echo "$url" >> "$temp_queue"
+    fi
+  done < "$DF_QUEUE_FILE"
+  
+  # Replace the queue file with the updated version
+  if [[ -s "$temp_queue" ]]; then
+    mv "$temp_queue" "$DF_QUEUE_FILE"
+    gum_info "Queue processing complete. Remaining items in queue."
+  else
+    rm -f "$DF_QUEUE_FILE" "$temp_queue"
+    gum_info "Queue processing complete. Queue is now empty."
+  fi
+  
+  exit 0
+fi
 
 # Collect URLs from positional args or stdin
 urls=()
@@ -237,9 +316,35 @@ fi
 # Ensure download dir exists (again)
 mkdir -p -- "$DF_DOWNLOAD_DIR"
 
+# Add URL to queue file
+add_to_queue() {
+  local url="$1"
+  
+  # Basic validation
+  if [[ ! "$url" =~ ^https?:// ]]; then
+    gum_error "Skipping invalid URL: <redacted>"
+    return 1
+  fi
+  
+  # Ensure queue file directory exists
+  local queue_dir
+  queue_dir="$(dirname "$DF_QUEUE_FILE")"
+  mkdir -p -- "$queue_dir"
+  
+  # Append URL to queue file
+  echo "$url" >> "$DF_QUEUE_FILE"
+  gum_info "Added to queue: $DF_QUEUE_FILE"
+  return 0
+}
+
 # Main per-URL processing
 download_one() {
   local url="$1"
+
+  # If queue mode is enabled (and not in processor mode), add to queue instead of downloading
+  if [[ "$DF_QUEUE" == "true" && "$PROCESSOR_MODE" -eq 0 ]]; then
+    return "$(add_to_queue "$url")"
+  fi
 
   # Basic validation
   if [[ ! "$url" =~ ^https?:// ]]; then
@@ -312,4 +417,9 @@ for u in "${urls[@]}"; do
   download_one "$u" || gum_error "Warning: failed to queue or download (redacted)."
 done
 
-gum_info "All requests processed. For background downloads check wget-log*; foreground downloads printed above."
+if [[ "$DF_QUEUE" == "true" ]]; then
+  gum_info "All URLs queued to: $DF_QUEUE_FILE"
+  gum_info "Run with --processor to process the queue."
+else
+  gum_info "All requests processed. For background downloads check wget-log*; foreground downloads printed above."
+fi
