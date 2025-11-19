@@ -343,7 +343,8 @@ download_one() {
 
   # If queue mode is enabled (and not in processor mode), add to queue instead of downloading
   if [[ "$DF_QUEUE" == "true" && "$PROCESSOR_MODE" -eq 0 ]]; then
-    return "$(add_to_queue "$url")"
+    add_to_queue "$url"
+    return $?
   fi
 
   # Basic validation
