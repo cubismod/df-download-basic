@@ -223,65 +223,14 @@ while [[ ${1-} == -* ]]; do
   esac
 done
 
-# Process queue mode
-if [[ "$PROCESSOR_MODE" -eq 1 ]]; then
-  if [[ ! -f "$DF_QUEUE_FILE" ]]; then
-    gum_info "Queue file not found: $DF_QUEUE_FILE"
-    exit 0
-  fi
-
-  if [[ ! -s "$DF_QUEUE_FILE" ]]; then
-    gum_info "Queue is empty."
-    exit 0
-  fi
-
-  gum_info "Processing queue from: $DF_QUEUE_FILE"
-
-  # Create a temporary file for the updated queue
-  temp_queue="$(mktemp)"
-  trap 'rm -f "$temp_queue"' EXIT
-
-  # Process each URL in the queue
-  while IFS= read -r url || [[ -n "$url" ]]; do
-    url="${url#"${url%%[![:space:]]*}"}"
-    url="${url%"${url##*[![:space:]]}"}"
-    [[ -z "$url" ]] && continue
-
-    gum_info "Processing from queue: <URL redacted>"
-
-    # Download this URL (always in foreground for processor mode)
-    FOREGROUND=1
-    DF_QUEUE=false  # Disable queue mode to actually download
-    if download_one "$url"; then
-      gum_info "Successfully downloaded from queue."
-      # Don't add to temp file (remove from queue)
-    else
-      gum_error "Failed to download. Keeping in queue."
-      # Keep in queue by writing to temp file
-      echo "$url" >> "$temp_queue"
-    fi
-  done < "$DF_QUEUE_FILE"
-
-  # Replace the queue file with the updated version
-  if [[ -s "$temp_queue" ]]; then
-    mv "$temp_queue" "$DF_QUEUE_FILE"
-    gum_info "Queue processing complete. Remaining items in queue."
-  else
-    rm -f "$DF_QUEUE_FILE" "$temp_queue"
-    gum_info "Queue processing complete. Queue is now empty."
-  fi
-
-  exit 0
-fi
-
-# Collect URLs from positional args or stdin
+# Collect URLs from positional args or stdin (skip if in processor mode)
 urls=()
-if [[ $# -gt 0 ]]; then
+if [[ "$PROCESSOR_MODE" -eq 0 ]] && [[ $# -gt 0 ]]; then
   # remaining args are URLs
   for a in "$@"; do
     urls+=("$a")
   done
-else
+elif [[ "$PROCESSOR_MODE" -eq 0 ]]; then
   # If nothing provided as args, try reading stdin (pipe)
   if ! [[ -t 0 ]]; then
     while IFS= read -r line || [[ -n "$line" ]]; do
@@ -308,7 +257,7 @@ else
   fi
 fi
 
-if [[ ${#urls[@]} -eq 0 ]]; then
+if [[ "$PROCESSOR_MODE" -eq 0 ]] && [[ ${#urls[@]} -eq 0 ]]; then
   gum_error "No URLs to download. Exiting."
   exit 1
 fi
@@ -412,6 +361,57 @@ download_one() {
     return 0
   fi
 }
+
+# Process queue mode
+if [[ "$PROCESSOR_MODE" -eq 1 ]]; then
+  if [[ ! -f "$DF_QUEUE_FILE" ]]; then
+    gum_error "Queue file not found: $DF_QUEUE_FILE"
+    exit 1
+  fi
+
+  if [[ ! -s "$DF_QUEUE_FILE" ]]; then
+    gum_info "Queue is empty."
+    exit 0
+  fi
+
+  gum_info "Processing queue from: $DF_QUEUE_FILE"
+  
+  # Create a temporary file for the updated queue
+  temp_queue="$(mktemp)"
+  trap 'rm -f "$temp_queue"' EXIT
+  
+  # Process each URL in the queue
+  while IFS= read -r url || [[ -n "$url" ]]; do
+    url="${url#"${url%%[![:space:]]*}"}"
+    url="${url%"${url##*[![:space:]]}"}"
+    [[ -z "$url" ]] && continue
+    
+    gum_info "Processing from queue: <URL redacted>"
+    
+    # Download this URL (always in foreground for processor mode)
+    FOREGROUND=1
+    DF_QUEUE=false  # Disable queue mode to actually download
+    if download_one "$url"; then
+      gum_info "Successfully downloaded from queue."
+      # Don't add to temp file (remove from queue)
+    else
+      gum_error "Failed to download. Keeping in queue."
+      # Keep in queue by writing to temp file
+      echo "$url" >> "$temp_queue"
+    fi
+  done < "$DF_QUEUE_FILE"
+  
+  # Replace the queue file with the updated version
+  if [[ -s "$temp_queue" ]]; then
+    mv "$temp_queue" "$DF_QUEUE_FILE"
+    gum_info "Queue processing complete. Remaining items in queue."
+  else
+    rm -f "$DF_QUEUE_FILE" "$temp_queue"
+    gum_info "Queue processing complete. Queue is now empty."
+  fi
+  
+  exit 0
+fi
 
 # Iterate over URLs
 for u in "${urls[@]}"; do
