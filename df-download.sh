@@ -338,8 +338,7 @@ download_one() {
   if [[ "$FOREGROUND" -eq 1 ]]; then
     gum_info "Downloading (foreground) -> $dest"
     if command -v wget >/dev/null 2>&1; then
-      # Show progress; wget will output progress to terminal.
-      wget -c --show-progress -O "$dest" -- "$url"
+      wget -c -O "$dest" -- "$url"
       local rc=$?
       if [[ $rc -ne 0 ]]; then
         gum_error "wget failed for: $dest (exit $rc)"
@@ -375,19 +374,19 @@ if [[ "$PROCESSOR_MODE" -eq 1 ]]; then
   fi
 
   gum_info "Processing queue from: $DF_QUEUE_FILE"
-  
+
   # Create a temporary file for the updated queue
   temp_queue="$(mktemp)"
   trap 'rm -f "$temp_queue"' EXIT
-  
+
   # Process each URL in the queue
   while IFS= read -r url || [[ -n "$url" ]]; do
     url="${url#"${url%%[![:space:]]*}"}"
     url="${url%"${url##*[![:space:]]}"}"
     [[ -z "$url" ]] && continue
-    
+
     gum_info "Processing from queue: <URL redacted>"
-    
+
     # Download this URL (always in foreground for processor mode)
     FOREGROUND=1
     DF_QUEUE=false  # Disable queue mode to actually download
@@ -400,7 +399,7 @@ if [[ "$PROCESSOR_MODE" -eq 1 ]]; then
       echo "$url" >> "$temp_queue"
     fi
   done < "$DF_QUEUE_FILE"
-  
+
   # Replace the queue file with the updated version
   if [[ -s "$temp_queue" ]]; then
     mv "$temp_queue" "$DF_QUEUE_FILE"
@@ -409,7 +408,7 @@ if [[ "$PROCESSOR_MODE" -eq 1 ]]; then
     rm -f "$DF_QUEUE_FILE" "$temp_queue"
     gum_info "Queue processing complete. Queue is now empty."
   fi
-  
+
   exit 0
 fi
 
