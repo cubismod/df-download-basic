@@ -338,7 +338,13 @@ download_one() {
   if [[ "$FOREGROUND" -eq 1 ]]; then
     gum_info "Downloading (foreground) -> $dest"
     if command -v wget >/dev/null 2>&1; then
-      wget -c -O "$dest" -- "$url"
+      # Show progress; wget will output progress to terminal.
+      # In processor mode, suppress verbose output
+      if [[ "$PROCESSOR_MODE" -eq 1 ]]; then
+        wget -q -c -O "$dest" -- "$url"
+      else
+        wget -c --show-progress -O "$dest" -- "$url"
+      fi
       local rc=$?
       if [[ $rc -ne 0 ]]; then
         gum_error "wget failed for: $dest (exit $rc)"
