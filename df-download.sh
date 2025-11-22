@@ -371,7 +371,7 @@ download_one() {
 if [[ "$PROCESSOR_MODE" -eq 1 ]]; then
   if [[ ! -f "$DF_QUEUE_FILE" ]]; then
     gum_error "Queue file not found: $DF_QUEUE_FILE"
-    exit 1
+    exit 0
   fi
 
   if [[ ! -s "$DF_QUEUE_FILE" ]]; then
