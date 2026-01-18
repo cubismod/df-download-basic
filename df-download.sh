@@ -320,19 +320,25 @@ download_one() {
     sanitized="${sanitized}.mp4"
   fi
 
-  # Build destination path (unique)
+  # Determine the canonical destination path (preserve original filename if possible)
+  local candidate="$DF_DOWNLOAD_DIR/$sanitized"
   local dest
-  dest="$(unique_path "$DF_DOWNLOAD_DIR" "$sanitized")"
+
+  if [[ -e "$candidate" ]]; then
+    gum_info "Found existing file: $candidate"
+    # Ask user whether to redownload (overwrite) the existing file
+    if ! check_existing_and_prompt "$candidate"; then
+      # User chose not to redownload
+      return 0
+    fi
+    # User chose to redownload; check_existing_and_prompt removed the existing file
+    dest="$candidate"
+  else
+    # No existing file with the canonical name; pick a unique path to avoid collisions
+    dest="$(unique_path "$DF_DOWNLOAD_DIR" "$sanitized")"
+  fi
 
   gum_info "Destination: $dest"
-
-  # If file exists (unique_path ensures non-collision) — but in rare case unique_path may append suffix,
-  # we still check for the specific dest since unique_path checks for existing files.
-  # Ask user whether to redownload if it exists.
-  if ! check_existing_and_prompt "$dest"; then
-    # User chose not to redownload
-    return 0
-  fi
 
   # Start wget either in foreground or background
   if [[ "$FOREGROUND" -eq 1 ]]; then
