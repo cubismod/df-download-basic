@@ -45,6 +45,15 @@ gum_confirm() {
   # Usage: gum_confirm "Question?"
   # Returns 0 on yes, 1 on no.
   local prompt="$1"
+
+  # In processor (batch) mode we should not do interactive prompting.
+  # Default to "no" (skip redownload) so processor runs are non-interactive.
+  if [[ "${PROCESSOR_MODE:-0}" -eq 1 ]]; then
+    # Avoid calling `gum` (which requires a TTY) from processor mode.
+    printf '%s\n' "Processor mode: skipping interactive confirmation (default: no)" >&2
+    return 1
+  fi
+
   if [[ "$GUM_AVAILABLE" -eq 1 ]]; then
     if gum confirm "$prompt"; then
       return 0
