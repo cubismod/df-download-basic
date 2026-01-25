@@ -46,7 +46,7 @@ gum_confirm() {
   # Returns 0 on yes, 1 on no.
   local prompt="$1"
   if [[ "$GUM_AVAILABLE" -eq 1 ]]; then
-    if gum confirm --no-spin --placeholder "$prompt"; then
+    if gum confirm --placeholder "$prompt"; then
       return 0
     else
       return 1
