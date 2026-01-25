@@ -172,32 +172,6 @@ unique_path() {
   printf '%s' "$candidate"
 }
 
-# Check if a destination file already exists and if user wants to redownload.
-# Returns:
-#   0 = proceed with download (either file doesn't exist, or user chose to redownload)
-#   1 = skip download (user chose not to redownload)
-check_existing_and_prompt() {
-  local dest="$1"
-
-  if [[ -e "$dest" ]]; then
-    # File exists: ask user if they want to re-download (redownload) it.
-    # We avoid printing any URL or other sensitive info; only filename/path is shown.
-    if gum_confirm "File already exists: $dest. Redownload (overwrite) it?"; then
-      # User wants to redownload: remove the existing file first to ensure a fresh download.
-      # We remove the file before downloading so wget doesn't attempt to resume.
-      rm -f -- "$dest"
-      gum_info "Existing file removed; will redownload -> $dest"
-      return 0
-    else
-      gum_info "Skipping (file exists) -> $dest"
-      return 1
-    fi
-  fi
-
-  # File doesn't exist; proceed
-  return 0
-}
-
 # Global option: foreground or background
 FOREGROUND=0
 PROCESSOR_MODE=0
@@ -332,12 +306,6 @@ download_one() {
 
   if [[ -e "$candidate" ]]; then
     gum_info "Found existing file: $candidate"
-    # Ask user whether to redownload (overwrite) the existing file
-    if ! check_existing_and_prompt "$candidate"; then
-      # User chose not to redownload
-      return 0
-    fi
-    # User chose to redownload; check_existing_and_prompt removed the existing file
     dest="$candidate"
   else
     # No existing file with the canonical name; pick a unique path to avoid collisions
