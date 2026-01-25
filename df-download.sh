@@ -243,7 +243,7 @@ elif [[ "$PROCESSOR_MODE" -eq 0 ]]; then
     # Interactive and no URLs: prompt once if gum available
     if [[ "$GUM_AVAILABLE" -eq 1 ]]; then
       gum_info "Enter a URL to download (or leave empty to cancel):"
-      first="$(gum input "https://example.com/video.mp4?secure=...')"
+      first="$(gum input 'https://example.com/video.mp4?secure=...')"
       if [[ -n "$first" ]]; then
         urls+=("$first")
       else
