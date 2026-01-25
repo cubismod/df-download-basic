@@ -46,7 +46,7 @@ gum_confirm() {
   # Returns 0 on yes, 1 on no.
   local prompt="$1"
   if [[ "$GUM_AVAILABLE" -eq 1 ]]; then
-    if gum confirm --placeholder "$prompt"; then
+    if gum confirm "$prompt"; then
       return 0
     else
       return 1
@@ -243,7 +243,7 @@ elif [[ "$PROCESSOR_MODE" -eq 0 ]]; then
     # Interactive and no URLs: prompt once if gum available
     if [[ "$GUM_AVAILABLE" -eq 1 ]]; then
       gum_info "Enter a URL to download (or leave empty to cancel):"
-      first="$(gum input --placeholder 'https://example.com/video.mp4?secure=...')"
+      first="$(gum input "https://example.com/video.mp4?secure=...')"
       if [[ -n "$first" ]]; then
         urls+=("$first")
       else
