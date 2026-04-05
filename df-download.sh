@@ -10,11 +10,13 @@
 # Options:
 #   -f, --foreground   Show wget progress in the foreground (no backgrounding)
 #   --processor        Process the queue file (download queued videos)
+#   --dedup            Scan download directory and hardlink duplicate files
 #   -h, --help         Show help
 #
 # Environment Variables:
 #   DF_QUEUE=true      Enable queue mode (add URLs to queue file instead of downloading)
 #   DF_QUEUE_FILE      Path to queue file (defaults to $HOME/.df_queue)
+#   DF_HASH_FILE       Path to hash registry file (defaults to $HOME/.df_hash_registry)
 #
 set -euo pipefail
 
@@ -76,6 +78,9 @@ DF_DOWNLOAD_DIR="${DF_DOWNLOAD_DIR:-${HOME:-.}/Downloads}"
 DF_QUEUE="${DF_QUEUE:-false}"
 DF_QUEUE_FILE="${DF_QUEUE_FILE:-${HOME:-.}/.df_queue}"
 
+# Hash registry configuration
+DF_HASH_FILE="${DF_HASH_FILE:-${HOME:-.}/df_hash_registry}"
+
 # Ensure download dir exists
 mkdir -p -- "$DF_DOWNLOAD_DIR"
 
@@ -90,17 +95,20 @@ the full URL (including query) to stdout.
 Options:
   -f, --foreground   Show wget progress in foreground (do not background)
   --processor        Process the queue file (download queued videos)
+  --dedup            Scan download directory and hardlink duplicate files
   -h, --help         Show this help and exit
 
 Environment Variables:
   DF_QUEUE=true      Enable queue mode (add URLs to queue file instead of downloading)
   DF_QUEUE_FILE      Path to queue file (defaults to \$HOME/.df_queue)
+  DF_HASH_FILE       Path to hash registry file (defaults to \$HOME/.df_hash_registry)
 
 Examples:
   DF_DOWNLOAD_DIR=\$PWD/downloads $(basename "$0") -f \"https://example.com/video.mp4?secure=...\"
   $(basename "$0") -  # read URLs from stdin
   DF_QUEUE=true $(basename "$0") \"https://example.com/video.mp4?secure=...\"  # add to queue
-  $(basename "$0") --processor  # process queue"
+  $(basename "$0") --processor  # process queue
+  $(basename "$0") --dedup  # find and hardlink duplicates"
   else
     cat <<EOF
 Usage: $(basename "$0") [OPTIONS] [URL]...
@@ -111,17 +119,20 @@ the full URL (including query) to stdout.
 Options:
   -f, --foreground   Show wget progress in foreground (do not background)
   --processor        Process the queue file (download queued videos)
+  --dedup            Scan download directory and hardlink duplicate files
   -h, --help         Show this help and exit
 
 Environment Variables:
   DF_QUEUE=true      Enable queue mode (add URLs to queue file instead of downloading)
   DF_QUEUE_FILE      Path to queue file (defaults to \$HOME/.df_queue)
+  DF_HASH_FILE       Path to hash registry file (defaults to \$HOME/.df_hash_registry)
 
 Examples:
   DF_DOWNLOAD_DIR=\$PWD/downloads $(basename "$0") -f "https://example.com/video.mp4?secure=..."
   $(basename "$0") -  # read URLs from stdin
   DF_QUEUE=true $(basename "$0") "https://example.com/video.mp4?secure=..."  # add to queue
   $(basename "$0") --processor  # process queue
+  $(basename "$0") --dedup  # find and hardlink duplicates
 EOF
   fi
 }
@@ -152,6 +163,102 @@ sanitize_filename() {
   printf '%s' "$name"
 }
 
+# Normalize URL: strip expiring tokens, sort query params for consistent comparison
+normalize_url() {
+  local url="$1"
+  local base="${url%%\?*}"
+  local query="${url#*\?}"
+
+  if [[ "$url" == "$base" ]]; then
+    printf '%s' "$url"
+    return
+  fi
+
+  local normalized_query=""
+  if [[ -n "$query" ]]; then
+    local -a params=()
+    local old_ifs="$IFS"
+    IFS='&'
+    read -ra params <<< "$query"
+    IFS="$old_ifs"
+    local -a kept_params=()
+    for param in "${params[@]}"; do
+      local key="${param%%=*}"
+      case "$key" in
+        signature|token|auth|session|sid|expires|exp|timestamp|ts|nonce)
+          continue
+          ;;
+        *)
+          kept_params+=("$param")
+          ;;
+      esac
+    done
+
+    if [[ ${#kept_params[@]} -gt 0 ]]; then
+      local -a sorted=()
+      while IFS= read -r line; do
+        sorted+=("$line")
+      done < <(printf '%s\n' "${kept_params[@]}" | sort)
+      normalized_query="?${sorted[*]}"
+      normalized_query="${normalized_query// /}"
+    fi
+  fi
+
+  printf '%s' "${base}${normalized_query}"
+}
+
+# Compute SHA-256 hash of a file
+compute_hash() {
+  local file="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$file" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$file" | awk '{print $1}'
+  else
+    echo ""
+  fi
+}
+
+# Initialize hash registry file
+init_hash_registry() {
+  if [[ ! -f "$DF_HASH_FILE" ]]; then
+    local registry_dir
+    registry_dir="$(dirname "$DF_HASH_FILE")"
+    mkdir -p -- "$registry_dir"
+    touch "$DF_HASH_FILE"
+  fi
+}
+
+# Lookup hash in registry, returns filepath if found
+lookup_hash() {
+  local hash="$1"
+  init_hash_registry
+  grep "^${hash}|" "$DF_HASH_FILE" 2>/dev/null | head -1 | cut -d'|' -f2
+}
+
+# Lookup URL in registry, returns hash if found
+lookup_url() {
+  local url="$1"
+  init_hash_registry
+  grep "|${url}$" "$DF_HASH_FILE" 2>/dev/null | head -1 | cut -d'|' -f1
+}
+
+# Store hash-to-filepath and hash-to-URL mapping in registry
+store_hash() {
+  local hash="$1"
+  local filepath="$2"
+  local url="$3"
+  init_hash_registry
+
+  local normalized_url
+  normalized_url="$(normalize_url "$url")"
+
+  grep -v "^${hash}|" "$DF_HASH_FILE" > "${DF_HASH_FILE}.tmp" 2>/dev/null || true
+  mv "${DF_HASH_FILE}.tmp" "$DF_HASH_FILE"
+
+  echo "${hash}|${filepath}|${normalized_url}|$(date +%s)" >> "$DF_HASH_FILE"
+}
+
 # Ensure unique filename (append _N suffix if needed)
 unique_path() {
   local dir="$1"
@@ -175,6 +282,7 @@ unique_path() {
 # Global option: foreground or background
 FOREGROUND=0
 PROCESSOR_MODE=0
+DEDUP_MODE=0
 
 # Parse leading CLI options (-f/--foreground, --processor, -h/--help)
 while [[ ${1-} == -* ]]; do
@@ -185,6 +293,10 @@ while [[ ${1-} == -* ]]; do
       ;;
     --processor)
       PROCESSOR_MODE=1
+      shift
+      ;;
+    --dedup)
+      DEDUP_MODE=1
       shift
       ;;
     -h|--help)
@@ -255,6 +367,37 @@ add_to_queue() {
     return 1
   fi
 
+  # Normalize URL for deduplication
+  local normalized_url
+  normalized_url="$(normalize_url "$url")"
+
+  # Check if URL already exists in queue (normalized comparison)
+  if [[ -f "$DF_QUEUE_FILE" ]]; then
+    while IFS= read -r queued_url || [[ -n "$queued_url" ]]; do
+      queued_url="${queued_url#"${queued_url%%[![:space:]]*}"}"
+      queued_url="${queued_url%"${queued_url##*[![:space:]]}"}"
+      [[ -z "$queued_url" ]] && continue
+      local normalized_queued
+      normalized_queued="$(normalize_url "$queued_url")"
+      if [[ "$normalized_url" == "$normalized_queued" ]]; then
+        gum_info "URL already in queue (duplicate skipped)."
+        return 0
+      fi
+    done < "$DF_QUEUE_FILE"
+  fi
+
+  # Check if already downloaded (hash registry lookup)
+  local existing_hash
+  existing_hash="$(lookup_url "$url")"
+  if [[ -n "$existing_hash" ]]; then
+    local existing_file
+    existing_file="$(lookup_hash "$existing_hash")"
+    if [[ -n "$existing_file" && -f "$existing_file" ]]; then
+      gum_info "Already downloaded: $existing_file"
+      return 0
+    fi
+  fi
+
   # Ensure queue file directory exists
   local queue_dir
   queue_dir="$(dirname "$DF_QUEUE_FILE")"
@@ -312,6 +455,29 @@ download_one() {
     dest="$(unique_path "$DF_DOWNLOAD_DIR" "$sanitized")"
   fi
 
+  # Check if this URL was already downloaded (hash registry lookup)
+  local existing_hash
+  existing_hash="$(lookup_url "$url")"
+  if [[ -n "$existing_hash" ]]; then
+    local existing_file
+    existing_file="$(lookup_hash "$existing_hash")"
+    if [[ -n "$existing_file" && -f "$existing_file" ]]; then
+      # Verify the existing file still has the same hash
+      local current_hash
+      current_hash="$(compute_hash "$existing_file")"
+      if [[ "$current_hash" == "$existing_hash" ]]; then
+        gum_info "Already downloaded (hash match): $existing_file"
+        # Create hardlink if destination differs
+        if [[ "$dest" != "$existing_file" ]]; then
+          rm -f "$dest"
+          ln "$existing_file" "$dest"
+          gum_info "Created hardlink: $dest"
+        fi
+        return 0
+      fi
+    fi
+  fi
+
   gum_info "Destination: $dest"
 
   # Start wget either in foreground or background
@@ -331,6 +497,14 @@ download_one() {
         return 1
       fi
       gum_info "Completed -> $dest"
+
+      # Compute and store hash for deduplication
+      local file_hash
+      file_hash="$(compute_hash "$dest")"
+      if [[ -n "$file_hash" ]]; then
+        store_hash "$file_hash" "$dest" "$url"
+      fi
+
       return 0
     else
       gum_error "wget not found on PATH"
@@ -393,6 +567,48 @@ if [[ "$PROCESSOR_MODE" -eq 1 ]]; then
   else
     rm -f "$DF_QUEUE_FILE" "$temp_queue"
     gum_info "Queue processing complete. Queue is now empty."
+  fi
+
+  exit 0
+fi
+
+# Deduplication mode: scan directory and hardlink duplicates
+if [[ "$DEDUP_MODE" -eq 1 ]]; then
+  gum_info "Scanning for duplicates in: $DF_DOWNLOAD_DIR"
+
+  init_hash_registry
+
+  declare -A hash_to_file
+  duplicates_found=0
+  space_saved=0
+
+  while IFS= read -r -d '' file; do
+    [[ -f "$file" ]] || continue
+
+    file_hash="$(compute_hash "$file")"
+    [[ -z "$file_hash" ]] && continue
+
+    if [[ -n "${hash_to_file[$file_hash]+x}" ]]; then
+      original="${hash_to_file[$file_hash]}"
+      file_size="$(stat -f%z "$file" 2>/dev/null || stat -c%s "$file" 2>/dev/null || echo 0)"
+
+      rm -f "$file"
+      ln "$original" "$file"
+      store_hash "$file_hash" "$file" ""
+
+      ((duplicates_found++)) || true
+      ((space_saved += file_size)) || true
+      gum_info "Linked duplicate: $file -> $original"
+    else
+      hash_to_file[$file_hash]="$file"
+      store_hash "$file_hash" "$file" ""
+    fi
+  done < <(find "$DF_DOWNLOAD_DIR" -maxdepth 1 -type f -print0 2>/dev/null)
+
+  if [[ $duplicates_found -gt 0 ]]; then
+    gum_info "Found $duplicates_found duplicate(s), saved $((space_saved / 1024 / 1024))MB"
+  else
+    gum_info "No duplicates found."
   fi
 
   exit 0
