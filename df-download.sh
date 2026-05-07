@@ -552,11 +552,8 @@ if [[ "$PROCESSOR_MODE" -eq 1 ]]; then
     DF_QUEUE=false  # Disable queue mode to actually download
     if download_one "$url"; then
       gum_info "Successfully downloaded from queue."
-      # Don't add to temp file (remove from queue)
     else
-      gum_error "Failed to download. Keeping in queue."
-      # Keep in queue by writing to temp file
-      echo "$url" >> "$temp_queue"
+      gum_error "Failed to download. Removing from queue."
     fi
   done < "$DF_QUEUE_FILE"
 
